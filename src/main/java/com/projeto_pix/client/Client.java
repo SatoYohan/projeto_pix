@@ -24,9 +24,31 @@ public class Client {
         try (Socket socket = new Socket(serverAddress, serverPort)) {
             out = new PrintWriter(socket.getOutputStream(), true);
             in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-            System.out.println("Conectado ao servidor em " + serverAddress + ":" + serverPort);
 
-            mainMenu();
+            System.out.println("Conectando ao servidor para validar o protocolo...");
+
+            // 1. Enviar a operação 'conectar' obrigatória
+            ObjectNode connectRequest = mapper.createObjectNode();
+            connectRequest.put("operacao", "conectar");
+            out.println(connectRequest.toString());
+
+            // 2. Esperar e validar a resposta
+            String serverResponse = in.readLine();
+            if (serverResponse == null) {
+                throw new IOException("Servidor não respondeu à tentativa de conexão.");
+            }
+
+            // Usamos o seu validador para garantir que a resposta está correta
+            com.projeto_pix.common.Validator.validateServer(serverResponse);
+            JsonNode responseNode = mapper.readTree(serverResponse);
+
+            // 3. Verificar se o status da conexão é 'true'
+            if (responseNode.get("status").asBoolean()) {
+                System.out.println("Conexão estabelecida com sucesso!");
+                mainMenu(); // Só chama o menu principal se a conexão for bem-sucedida
+            } else {
+                System.err.println("Falha ao conectar: " + responseNode.get("info").asText());
+            }
 
         } catch (Exception e) {
             System.err.println("Erro ao conectar ou comunicar com o servidor: " + e.getMessage());
@@ -194,11 +216,13 @@ public class Client {
     // --- MÉTODOS AUXILIARES DE COMUNICAÇÃO ---
 
     private static void sendAndPrintResponse(String json) throws IOException {
+        System.out.println("Enviando para o Servidor: " + json);
         out.println(json);
         System.out.println("Resposta do Servidor: " + in.readLine());
     }
 
     private static String sendAndGetResponse(String json) throws IOException {
+        System.out.println("Enviando para o Servidor: " + json);
         out.println(json);
         return in.readLine();
     }
