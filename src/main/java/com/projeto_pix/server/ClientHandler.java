@@ -12,7 +12,10 @@ import com.projeto_pix.common.model.Usuario;
 
 public class ClientHandler implements Runnable {
     private final Socket clientSocket;
-    private static final ObjectMapper mapper = new ObjectMapper(); // Reutilizamos o ObjectMapper
+    private static final ObjectMapper mapper = new ObjectMapper();
+
+    // Adicionamos um estado para saber se o cliente já enviou a operação "conectar".
+    private boolean isConnected = false;
 
     public ClientHandler(Socket socket) {
         this.clientSocket = socket;
@@ -28,17 +31,44 @@ public class ClientHandler implements Runnable {
             while ((jsonRequest = in.readLine()) != null) {
                 System.out.println("Recebido do cliente: " + jsonRequest);
                 String jsonResponse = "";
+
+                // Vamos extrair a operação ANTES de chamar o validador.
+                JsonNode rootNode;
                 try {
-                    Validator.validateClient(jsonRequest);
-                    jsonResponse = processOperation(jsonRequest);
-                } catch (Exception e) {
-                    // Se a validação falhar, cria um JSON de erro
-                    ObjectNode errorNode = mapper.createObjectNode();
-                    errorNode.put("operacao", "erro_validacao");
-                    errorNode.put("status", false);
-                    errorNode.put("info", e.getMessage());
-                    jsonResponse = errorNode.toString();
+                    rootNode = mapper.readTree(jsonRequest);
+                } catch (IOException e) {
+                    // Se o JSON for inválido, não podemos nem ler a operação.
+                    out.println("{\"operacao\":\"erro_json\",\"status\":false,\"info\":\"JSON mal formatado.\"}");
+                    continue; // Pula para a próxima iteração do loop.
                 }
+
+                String operacao = rootNode.has("operacao") ? rootNode.get("operacao").asText() : "";
+
+                // VERIFICAÇÃO DE PROTOCOLO: A primeira operação DEVE ser 'conectar'.
+                if (!isConnected) {
+                    if ("conectar".equals(operacao)) {
+                        isConnected = true;
+                        // Responde diretamente com sucesso, conforme o protocolo.
+                        jsonResponse = createResponse("conectar", true, "Servidor conectado com sucesso.");
+                    } else {
+                        // Se a primeira operação não for 'conectar', retorna o erro especificado.
+                        jsonResponse = createResponse(operacao, false, "Erro, para receber uma operacao, a primeira operacao deve ser 'conectar'");
+                    }
+                } else {
+                    // Se já estiver conectado, processa as outras operações normalmente.
+                    try {
+                        Validator.validateClient(jsonRequest); // Agora o validador só recebe operações que ele conhece.
+                        jsonResponse = processOperation(jsonRequest);
+                    } catch (Exception e) {
+                        // O validador ou o processador podem lançar uma exceção.
+                        ObjectNode errorNode = mapper.createObjectNode();
+                        errorNode.put("operacao", operacao); // Usa a operação que lemos
+                        errorNode.put("status", false);
+                        errorNode.put("info", e.getMessage());
+                        jsonResponse = errorNode.toString();
+                    }
+                }
+
                 System.out.println("Enviando para o cliente: " + jsonResponse);
                 out.println(jsonResponse);
             }
@@ -51,7 +81,10 @@ public class ClientHandler implements Runnable {
         JsonNode rootNode = mapper.readTree(jsonRequest);
         String operacao = rootNode.get("operacao").asText();
 
+        // Embora já tratado, é uma boa prática para o switch não cair no default.
         switch (operacao) {
+            case "conectar":
+                return createResponse("conectar", true, "Cliente já está conectado.");
             case "usuario_criar":
                 return handleUsuarioCriar(rootNode);
             case "usuario_login":
@@ -68,8 +101,6 @@ public class ClientHandler implements Runnable {
                 return createResponse("operacao_desconhecida", false, "A operação solicitada não é suportada.");
         }
     }
-
-    // --- MÉTODOS DE MANIPULAÇÃO DAS OPERAÇÕES ---
 
     private String handleUsuarioCriar(JsonNode node) {
         String nome = node.get("nome").asText();
@@ -172,8 +203,6 @@ public class ClientHandler implements Runnable {
 
         return createResponse("usuario_logout", false, "Token inválido.");
     }
-
-    // --- MÉTODO AUXILIAR ---
 
     private String createResponse(String operacao, boolean status, String info) {
         ObjectNode response = mapper.createObjectNode();
