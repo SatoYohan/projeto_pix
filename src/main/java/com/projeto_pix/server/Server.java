@@ -1,52 +1,35 @@
 // Em: src/main/java/com/projeto_pix/server/Server.java
 package com.projeto_pix.server;
 
-import java.net.InetAddress;
-import java.net.NetworkInterface;
+import java.net.InetAddress; // 1. Importe a classe InetAddress
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.net.SocketException;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Enumeration;
-import java.util.List;
+import java.net.UnknownHostException;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
 import com.projeto_pix.common.model.Usuario;
-import com.projeto_pix.common.model.Transacao;
 
 public class Server {
+    // Usamos ConcurrentHashMap para segurança em ambiente com múltiplas threads
+    // static para que sejam compartilhados entre todas as instâncias de ClientHandler
     public static final Map<String, Usuario> usuarios = new ConcurrentHashMap<>();
-    public static final Map<String, String> sessoesAtivas = new ConcurrentHashMap<>();
-
-    // Lista segura para threads para armazenar todas as transações
-    public static final List<Transacao> transacoes = Collections.synchronizedList(new ArrayList<>());
-    // Contador atômico para garantir IDs de transação únicos
-    public static final AtomicInteger transacaoIdCounter = new AtomicInteger(1);
-
-    private static final int DEFAULT_PORT = 24000;
+    public static final Map<String, String> sessoesAtivas = new ConcurrentHashMap<>(); // Mapeia token -> cpf
 
     public static void main(String[] args) {
-        int port = DEFAULT_PORT;
+        final int PORT = 12345;
+        try (ServerSocket serverSocket = new ServerSocket(PORT)) {
 
-        // Lógica para ler a porta a partir dos argumentos da linha de comando
-        if (args.length > 0) {
             try {
-                port = Integer.parseInt(args[0]);
-            } catch (NumberFormatException e) {
-                System.err.println("Argumento de porta inválido. Usando a porta padrão: " + DEFAULT_PORT);
+                // 2. Obtém o endereço de IP da máquina local
+                InetAddress ip = InetAddress.getLocalHost();
+                System.out.println("=================================================");
+                System.out.println("Servidor iniciado!");
+                System.out.println("IP para conexão: " + ip.getHostAddress());
+                System.out.println("Porta: " + PORT);
+                System.out.println("=================================================");
+            } catch (UnknownHostException e) {
+                System.err.println("Não foi possível obter o IP local: " + e.getMessage());
             }
-        }
-
-        try (ServerSocket serverSocket = new ServerSocket(port)) {
-
-            String ipAddress = findCorrectIPAddress();
-            System.out.println("=================================================");
-            System.out.println("Servidor iniciado!");
-            System.out.println("IP para conexão: " + ipAddress);
-            System.out.println("Porta: " + port);
-            System.out.println("=================================================");
 
             System.out.println("\nAguardando conexões de clientes...");
 
@@ -58,29 +41,5 @@ public class Server {
         } catch (Exception e) {
             e.printStackTrace();
         }
-    }
-
-    /**
-     * Itera por todas as interfaces de rede para encontrar o endereço IPv4 local correto.
-     * @return O endereço de IP como String, ou "IP não encontrado" em caso de falha.
-     */
-    private static String findCorrectIPAddress() {
-        try {
-            Enumeration<NetworkInterface> nets = NetworkInterface.getNetworkInterfaces();
-            for (NetworkInterface netint : Collections.list(nets)) {
-                if (!netint.isLoopback() && netint.isUp()) { // Ignora interfaces de loopback e inativas
-                    Enumeration<InetAddress> addresses = netint.getInetAddresses();
-                    for (InetAddress addr : Collections.list(addresses)) {
-                        // Verifica se é um endereço IPv4 e se é um IP privado (da rede local)
-                        if (addr instanceof java.net.Inet4Address && addr.isSiteLocalAddress()) {
-                            return addr.getHostAddress();
-                        }
-                    }
-                }
-            }
-        } catch (SocketException e) {
-            System.err.println("Erro ao buscar interfaces de rede: " + e.getMessage());
-        }
-        return "IP não encontrado";
     }
 }
