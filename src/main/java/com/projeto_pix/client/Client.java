@@ -3,10 +3,15 @@ package com.projeto_pix.client;
 
 import java.io.*;
 import java.net.Socket;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.Scanner;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.projeto_pix.common.Validator;
+import java.time.Instant;
 
 public class Client {
     private static String userToken = null; // Armazena o token após o login
@@ -27,25 +32,22 @@ public class Client {
 
             System.out.println("Conectando ao servidor para validar o protocolo...");
 
-            // 1. Enviar a operação 'conectar' obrigatória
             ObjectNode connectRequest = mapper.createObjectNode();
             connectRequest.put("operacao", "conectar");
-            out.println(connectRequest.toString());
 
-            // 2. Esperar e validar a resposta
-            String serverResponse = in.readLine();
+            // 1. Tenta conectar
+            // O método sendAndGetResponse AGORA valida a resposta do servidor
+            String serverResponse = sendAndGetResponse(connectRequest, "conectar");
             if (serverResponse == null) {
-                throw new IOException("Servidor não respondeu à tentativa de conexão.");
+                throw new IOException("Falha na validação da resposta do servidor.");
             }
 
-            // Usamos o seu validador para garantir que a resposta está correta
-            com.projeto_pix.common.Validator.validateServer(serverResponse);
             JsonNode responseNode = mapper.readTree(serverResponse);
 
-            // 3. Verificar se o status da conexão é 'true'
+            // 2. Verifica se a conexão foi bem-sucedida
             if (responseNode.get("status").asBoolean()) {
                 System.out.println("Conexão estabelecida com sucesso!");
-                mainMenu(); // Só chama o menu principal se a conexão for bem-sucedida
+                mainMenu();
             } else {
                 System.err.println("Falha ao conectar: " + responseNode.get("info").asText());
             }
@@ -70,6 +72,8 @@ public class Client {
                 System.out.println("4. Atualizar Cadastro");
                 System.out.println("5. Apagar Minha Conta");
                 System.out.println("6. Fazer Logout");
+                System.out.println("7. Depositar");
+                System.out.println("8. Ver Extrato");
                 System.out.println("0. Sair");
             }
 
@@ -101,6 +105,18 @@ public class Client {
                     if (userToken != null) fazerLogout();
                     else System.out.println("Opção inválida.");
                     break;
+                case "7":
+                    if (userToken != null) depositar();
+                    else System.out.println("Opção inválida.");
+                    break;
+                case "8":
+                    if (userToken != null) lerExtrato();
+                    else System.out.println("Opção inválida.");
+                    break;
+                case "9":
+                    if (userToken != null) fazerPix();
+                    else System.out.println("Opção inválida.");
+                    break;
                 case "0":
                     return;
                 default:
@@ -125,7 +141,7 @@ public class Client {
         request.put("cpf", cpf);
         request.put("senha", senha);
 
-        sendAndPrintResponse(request.toString());
+        sendAndPrintResponse(request, "usuario_criar");
     }
 
     private static void fazerLogin() throws IOException {
@@ -139,10 +155,13 @@ public class Client {
         request.put("cpf", cpf);
         request.put("senha", senha);
 
-        String responseStr = sendAndGetResponse(request.toString());
+        String responseStr = sendAndGetResponse(request, "usuario_login");
+        if (responseStr == null) return;
+
         System.out.println("Resposta do Servidor: " + responseStr);
 
         JsonNode responseNode = mapper.readTree(responseStr);
+
         if (responseNode.get("status").asBoolean()) {
             userToken = responseNode.get("token").asText(); // Armazena o token
             System.out.println("Login realizado com sucesso!");
@@ -153,7 +172,7 @@ public class Client {
         ObjectNode request = mapper.createObjectNode();
         request.put("operacao", "usuario_ler");
         request.put("token", userToken);
-        sendAndPrintResponse(request.toString());
+        sendAndPrintResponse(request, "usuario_ler");
     }
 
     private static void atualizarUsuario() throws IOException {
@@ -180,7 +199,7 @@ public class Client {
         }
         request.set("usuario", usuarioNode);
 
-        sendAndPrintResponse(request.toString());
+        sendAndPrintResponse(request, "usuario_atualizar");
     }
 
     private static void apagarUsuario() throws IOException {
@@ -195,7 +214,10 @@ public class Client {
         request.put("operacao", "usuario_deletar");
         request.put("token", userToken);
 
-        String responseStr = sendAndGetResponse(request.toString());
+        String responseStr = sendAndGetResponse(request, "usuario_deletar");
+
+        if (responseStr == null) return;
+
         System.out.println("Resposta do Servidor: " + responseStr);
 
         JsonNode responseNode = mapper.readTree(responseStr);
@@ -209,21 +231,145 @@ public class Client {
         request.put("operacao", "usuario_logout");
         request.put("token", userToken);
 
-        sendAndPrintResponse(request.toString());
+        sendAndPrintResponse(request, "usuario_logout");
         userToken = null; // Limpa o token localmente após o pedido de logout
+    }
+
+    /**
+     * (Item a) Cliente pede para depositar dinheiro.
+     */
+    private static void depositar() throws IOException {
+        System.out.print("Digite o valor a ser depositado (ex: 123.45): ");
+        try {
+            double valor = Double.parseDouble(scanner.nextLine());
+
+            ObjectNode request = mapper.createObjectNode();
+            request.put("operacao", "depositar");
+            request.put("token", userToken);
+            request.put("valor_enviado", valor);
+
+            sendAndPrintResponse(request, "depositar");
+
+        } catch (NumberFormatException e) {
+            System.err.println("Valor inválido. Use ponto como separador decimal.");
+        }
+    }
+
+    /**
+     * (Itens b, c) Cliente pede e mostra o extrato.
+     */
+    private static void lerExtrato() throws IOException {
+        System.out.print("Digite a data inicial (ex: 01/10/2025 08:00:00): ");
+        String dataInicialStr = scanner.nextLine();
+        System.out.print("Digite a data final (ex: 31/10/2025 23:59:59): ");
+        String dataFinalStr = scanner.nextLine();
+
+        try {
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm:ss");
+            String dataInicialISO = LocalDateTime.parse(dataInicialStr, formatter).toInstant(ZoneOffset.UTC).toString();
+            String dataFinalISO = LocalDateTime.parse(dataFinalStr, formatter).toInstant(ZoneOffset.UTC).toString();
+
+            ObjectNode request = mapper.createObjectNode();
+            request.put("operacao", "transacao_ler");
+            request.put("token", userToken);
+            request.put("data_inicial", dataInicialISO);
+            request.put("data_final", dataFinalISO);
+
+            String responseStr = sendAndGetResponse(request, "transacao_ler");
+            if (responseStr == null) return;
+
+            JsonNode responseNode = mapper.readTree(responseStr);
+            System.out.println("Resposta do Servidor: " + responseNode.toString());
+
+            if (responseNode.get("status").asBoolean()) {
+                System.out.println("\n--- EXTRATO DA CONTA ---");
+                JsonNode transacoes = responseNode.get("transacoes");
+                if (transacoes.isEmpty()) {
+                    System.out.println("Nenhuma transação encontrada no período.");
+                } else {
+                    for (JsonNode tx : transacoes) {
+                        String data = Instant.parse(tx.get("criado_em").asText()).toString();
+                        String enviador = tx.get("usuario_enviador").get("nome").asText();
+                        String recebedor = tx.get("usuario_recebedor").get("nome").asText();
+                        double valor = tx.get("valor_enviado").asDouble();
+
+                        System.out.printf("[%s] R$ %.2f de '%s' para '%s'\n", data, valor, enviador, recebedor);
+                    }
+                }
+                System.out.println("--------------------------");
+            }
+
+        } catch (Exception e) {
+            System.err.println("Formato de data inválido. Use dd/MM/yyyy HH:mm:ss");
+            // e.printStackTrace(); // Descomente para ver o erro completo
+        }
     }
 
     // --- MÉTODOS AUXILIARES DE COMUNICAÇÃO ---
 
-    private static void sendAndPrintResponse(String json) throws IOException {
-        System.out.println("Enviando para o Servidor: " + json);
-        out.println(json);
-        System.out.println("Resposta do Servidor: " + in.readLine());
+    private static void sendAndPrintResponse(ObjectNode request, String operacao) throws IOException {
+        String response = sendAndGetResponse(request, operacao);
+        if (response != null) {
+            System.out.println("Resposta do Servidor: " + response);
+        }
     }
 
-    private static String sendAndGetResponse(String json) throws IOException {
-        System.out.println("Enviando para o Servidor: " + json);
-        out.println(json);
-        return in.readLine();
+    private static String sendAndGetResponse(ObjectNode request, String operacao) throws IOException {
+        String jsonRequest = request.toString();
+        System.out.println("Enviando para o Servidor: " + jsonRequest);
+        out.println(jsonRequest);
+
+        String serverResponse = in.readLine();
+        if (serverResponse == null) {
+            System.err.println("Servidor não enviou resposta.");
+            return null;
+        }
+
+        try {
+            // (Protocolo 5.2) Cliente valida a resposta do servidor
+            Validator.validateServer(serverResponse);
+            return serverResponse; // Retorna a resposta válida
+        } catch (Exception e) {
+            // (Protocolo 4.11) Se a validação falhar, reporta o erro!
+            System.err.println("!!! ERRO NA RESPOSTA DO SERVIDOR: " + e.getMessage() + " !!!");
+            System.err.println("Resposta recebida: " + serverResponse);
+            reportErrorToServer(operacao, e.getMessage());
+            return null; // Retorna nulo para sinalizar que a resposta foi inválida
+        }
+    }
+
+    /**
+     * (Protocolo 4.11) Envia um relatório de erro para o servidor.
+     */
+    private static void reportErrorToServer(String operacaoEnviada, String infoErro) {
+        ObjectNode errorReport = mapper.createObjectNode();
+        errorReport.put("operacao", "erro_servidor");
+        errorReport.put("operacao_enviada", operacaoEnviada);
+        errorReport.put("info", "Erro do cliente: " + infoErro);
+
+        System.out.println("Enviando relatório de erro para o Servidor: " + errorReport.toString());
+        out.println(errorReport.toString());
+        // Não esperamos uma resposta para um relatório de erro
+    }
+
+    private static void fazerPix() throws IOException {
+        System.out.print("Digite o CPF de destino (formato 000.000.000-00): ");
+        String cpfDestino = scanner.nextLine();
+
+        System.out.print("Digite o valor a ser transferido (ex: 50.25): ");
+        try {
+            double valor = Double.parseDouble(scanner.nextLine());
+
+            ObjectNode request = mapper.createObjectNode();
+            request.put("operacao", "transacao_criar");
+            request.put("token", userToken);
+            request.put("valor", valor);
+            request.put("cpf_destino", cpfDestino);
+
+            sendAndPrintResponse(request, "transacao_criar");
+
+        } catch (NumberFormatException e) {
+            System.err.println("Valor inválido. Use ponto como separador decimal.");
+        }
     }
 }
