@@ -3,16 +3,21 @@ package com.projeto_pix.server;
 
 import java.io.*;
 import java.net.Socket;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.UUID;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.projeto_pix.common.Validator;
 import com.projeto_pix.common.model.Usuario;
+// Importa o modelo de Transacao (necessário para EP-2)
+import com.projeto_pix.common.model.Transacao;
 
 public class ClientHandler implements Runnable {
     private final Socket clientSocket;
-    private static final ObjectMapper mapper = new ObjectMapper(); // Reutilizamos o ObjectMapper
+    private static final ObjectMapper mapper = new ObjectMapper();
 
     public ClientHandler(Socket socket) {
         this.clientSocket = socket;
@@ -28,30 +33,57 @@ public class ClientHandler implements Runnable {
             while ((jsonRequest = in.readLine()) != null) {
                 System.out.println("Recebido do cliente: " + jsonRequest);
                 String jsonResponse = "";
+                String operacao = "desconhecida"; // Para log de erro
+
                 try {
+                    // 1. O Validator (v1.5) valida tudo, inclusive 'conectar'.
                     Validator.validateClient(jsonRequest);
-                    jsonResponse = processOperation(jsonRequest);
+
+                    // 2. Lê o JSON
+                    JsonNode rootNode = mapper.readTree(jsonRequest);
+                    operacao = rootNode.get("operacao").asText(); // Pega a operação para o switch
+
+                    // 3. Chama o método com a assinatura correta (JsonNode, String)
+                    jsonResponse = processOperation(rootNode, operacao);
+
                 } catch (Exception e) {
                     // Se a validação falhar, cria um JSON de erro
                     ObjectNode errorNode = mapper.createObjectNode();
-                    errorNode.put("operacao", "erro_validacao");
+                    errorNode.put("operacao", operacao); // Usa a operação lida
                     errorNode.put("status", false);
                     errorNode.put("info", e.getMessage());
                     jsonResponse = errorNode.toString();
                 }
+
                 System.out.println("Enviando para o cliente: " + jsonResponse);
-                out.println(jsonResponse);
+                if (jsonResponse != null) { // Não envia resposta para 'erro_servidor'
+                    out.println(jsonResponse);
+                }
             }
         } catch (IOException e) {
             System.out.println("Cliente desconectado: " + clientSocket.getInetAddress());
         }
     }
 
-    private String processOperation(String jsonRequest) throws IOException {
-        JsonNode rootNode = mapper.readTree(jsonRequest);
-        String operacao = rootNode.get("operacao").asText();
+    // --- CORREÇÃO DE ASSINATURA ---
+    // O método agora aceita 'JsonNode' e 'String' para bater com a chamada
+    private String processOperation(JsonNode rootNode, String operacao) throws IOException {
 
         switch (operacao) {
+            // --- NOVOS CASES EP-2 ---
+            case "conectar":
+                return createResponse("conectar", true, "Servidor conectado com sucesso.");
+            case "depositar":
+                return handleDepositar(rootNode);
+            case "transacao_ler":
+                return handleTransacaoLer(rootNode);
+            case "transacao_criar":
+                return handleTransacaoCriar(rootNode);
+            case "erro_servidor":
+                handleErroServidor(rootNode);
+                return null; // Não envia resposta
+
+            // --- Cases Antigos EP-1 ---
             case "usuario_criar":
                 return handleUsuarioCriar(rootNode);
             case "usuario_login":
@@ -69,7 +101,7 @@ public class ClientHandler implements Runnable {
         }
     }
 
-    // --- MÉTODOS DE MANIPULAÇÃO DAS OPERAÇÕES ---
+    // --- MÉTODOS DE MANIPULAÇÃO DAS OPERAÇÕES (EP-1) ---
 
     private String handleUsuarioCriar(JsonNode node) {
         String nome = node.get("nome").asText();
@@ -173,6 +205,134 @@ public class ClientHandler implements Runnable {
         return createResponse("usuario_logout", false, "Token inválido.");
     }
 
+    // --- NOVOS MÉTODOS DE MANIPULAÇÃO (EP-2) ---
+
+    /**
+     * (Itens f, g) Lida com o depósito e atualiza o saldo.
+     */
+    private String handleDepositar(JsonNode node) {
+        String token = node.get("token").asText();
+        double valorEnviado = node.get("valor_enviado").asDouble();
+        String cpf = Server.sessoesAtivas.get(token);
+
+        if (cpf == null) {
+            return createResponse("depositar", false, "Token inválido ou sessão expirada.");
+        }
+        if (valorEnviado <= 0) {
+            return createResponse("depositar", false, "Valor do depósito deve ser positivo.");
+        }
+
+        Usuario usuario = Server.usuarios.get(cpf);
+        // Item (g): Atualiza saldo
+        usuario.setSaldo(usuario.getSaldo() + valorEnviado);
+
+        // Item (4.9 do protocol): Cria registro de transação
+        int transacaoId = Server.transacaoIdCounter.getAndIncrement();
+        // Para depósito, o enviador e o recebedor são o mesmo usuário
+        Transacao deposito = new Transacao(transacaoId, valorEnviado, usuario, usuario);
+        Server.transacoes.add(deposito);
+
+        return createResponse("depositar", true, "Deposito realizado com sucesso.");
+    }
+
+    /**
+     * (Protocolo 4.7) Lida com a criação de uma transferência (PIX).
+     */
+    private String handleTransacaoCriar(JsonNode node) {
+        String token = node.get("token").asText();
+        String cpfDestino = node.get("cpf_destino").asText();
+        double valor = node.get("valor").asDouble();
+        String cpfEnviador = Server.sessoesAtivas.get(token);
+
+        if (cpfEnviador == null) {
+            return createResponse("transacao_criar", false, "Token inválido ou sessão expirada.");
+        }
+        if (valor <= 0) {
+            return createResponse("transacao_criar", false, "Valor da transação deve ser positivo.");
+        }
+        if (cpfEnviador.equals(cpfDestino)) {
+            return createResponse("transacao_criar", false, "Você não pode enviar um PIX para si mesmo.");
+        }
+
+        Usuario usuarioEnviador = Server.usuarios.get(cpfEnviador);
+        Usuario usuarioRecebedor = Server.usuarios.get(cpfDestino);
+
+        if (usuarioRecebedor == null) {
+            return createResponse("transacao_criar", false, "CPF de destino não encontrado.");
+        }
+
+        // Garante atomicidade na transação
+        synchronized (usuarioEnviador) {
+            if (usuarioEnviador.getSaldo() < valor) {
+                return createResponse("transacao_criar", false, "Saldo insuficiente.");
+            }
+            usuarioEnviador.setSaldo(usuarioEnviador.getSaldo() - valor);
+            usuarioRecebedor.setSaldo(usuarioRecebedor.getSaldo() + valor);
+        }
+
+        int transacaoId = Server.transacaoIdCounter.getAndIncrement();
+        Transacao transacao = new Transacao(transacaoId, valor, usuarioEnviador, usuarioRecebedor);
+        Server.transacoes.add(transacao);
+
+        return createResponse("transacao_criar", true, "Transação realizada com sucesso.");
+    }
+
+    /**
+     * (Item h) Lida com o pedido de extrato (transacao_ler).
+     */
+    private String handleTransacaoLer(JsonNode node) {
+        String token = node.get("token").asText();
+        String cpf = Server.sessoesAtivas.get(token);
+
+        if (cpf == null) {
+            return createResponse("transacao_ler", false, "Token inválido ou sessão expirada.");
+        }
+
+        try {
+            Instant dataInicial = Instant.parse(node.get("data_inicial").asText());
+            Instant dataFinal = Instant.parse(node.get("data_final").asText());
+
+            // Validação do limite de 31 dias
+            if (ChronoUnit.DAYS.between(dataInicial, dataFinal) > 31) {
+                return createResponse("transacao_ler", false, "Erro: O período máximo para extrato é de 31 dias.");
+            }
+
+            ArrayNode transacoesArray = mapper.createArrayNode();
+            // Itera de forma segura na lista de transações
+            synchronized (Server.transacoes) {
+                for (Transacao tx : Server.transacoes) {
+                    // Verifica se o usuário está envolvido E se está no intervalo de data
+                    if (tx.envolveUsuario(cpf) && tx.estaNoIntervalo(dataInicial, dataFinal)) {
+                        transacoesArray.add(criarJsonDaTransacao(tx));
+                    }
+                }
+            }
+
+            ObjectNode response = mapper.createObjectNode();
+            response.put("operacao", "transacao_ler");
+            response.put("status", true);
+            response.put("info", "Transações recuperadas com sucesso.");
+            response.set("transacoes", transacoesArray);
+            return response.toString();
+
+        } catch (Exception e) {
+            return createResponse("transacao_ler", false, "Erro ao processar datas ou transações.");
+        }
+    }
+
+    /**
+     * (Protocolo 4.11) Apenas loga o erro reportado pelo cliente.
+     */
+    private void handleErroServidor(JsonNode node) {
+        String operacaoOriginal = node.get("operacao_enviada").asText();
+        String infoErro = node.get("info").asText();
+
+        System.err.println("--- ERRO REPORTADO PELO CLIENTE ---");
+        System.err.println("Operação Original: " + operacaoOriginal);
+        System.err.println("Info: " + infoErro);
+        System.err.println("-------------------------------------");
+    }
+
     // --- MÉTODO AUXILIAR ---
 
     private String createResponse(String operacao, boolean status, String info) {
@@ -181,5 +341,26 @@ public class ClientHandler implements Runnable {
         response.put("status", status);
         response.put("info", info);
         return response.toString();
+    }
+
+    // Novo auxiliar para montar o JSON de uma transação (conforme protocolo 4.8)
+    private ObjectNode criarJsonDaTransacao(Transacao tx) {
+        ObjectNode txNode = mapper.createObjectNode();
+        txNode.put("id", tx.getId());
+        txNode.put("valor_enviado", tx.getValorEnviado());
+        txNode.put("criado_em", tx.getCriadoEm());
+        txNode.put("atualizado_em", tx.getCriadoEm()); // Protocolo pede, usamos o 'criado_em'
+
+        ObjectNode enviadorNode = mapper.createObjectNode();
+        enviadorNode.put("nome", tx.getUsuarioEnviador().getNome());
+        enviadorNode.put("cpf", tx.getUsuarioEnviador().getCpf());
+        txNode.set("usuario_enviador", enviadorNode);
+
+        ObjectNode recebedorNode = mapper.createObjectNode();
+        recebedorNode.put("nome", tx.getUsuarioRecebedor().getNome());
+        recebedorNode.put("cpf", tx.getUsuarioRecebedor().getCpf());
+        txNode.set("usuario_recebedor", recebedorNode);
+
+        return txNode;
     }
 }
