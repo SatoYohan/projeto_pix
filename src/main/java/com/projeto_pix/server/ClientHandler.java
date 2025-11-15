@@ -12,7 +12,6 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.projeto_pix.common.Validator;
 import com.projeto_pix.common.model.Usuario;
-// Importa o modelo de Transacao (necessário para EP-2)
 import com.projeto_pix.common.model.Transacao;
 
 public class ClientHandler implements Runnable {
@@ -33,30 +32,39 @@ public class ClientHandler implements Runnable {
             while ((jsonRequest = in.readLine()) != null) {
                 System.out.println("Recebido do cliente: " + jsonRequest);
                 String jsonResponse = "";
-                String operacao = "desconhecida"; // Para log de erro
+                String operacao = "desconhecida";
+                JsonNode rootNode = null;
 
                 try {
-                    // 1. O Validator (v1.5) valida tudo, inclusive 'conectar'.
+                    try {
+                        rootNode = mapper.readTree(jsonRequest);
+                        if (rootNode.has("operacao")) {
+                            operacao = rootNode.get("operacao").asText();
+                        }
+                    } catch (IOException e) {
+                        // Se o JSON for inválido, o validador vai pegar
+                    }
+
+                    // 2. Agora, chamamos o validador.
+                    // Se ele falhar (ex: data errada), a variável 'operacao' já terá o valor correto (ex: "transacao_ler")
                     Validator.validateClient(jsonRequest);
 
-                    // 2. Lê o JSON
-                    JsonNode rootNode = mapper.readTree(jsonRequest);
-                    operacao = rootNode.get("operacao").asText(); // Pega a operação para o switch
+                    // 3. (Já que rootNode foi lido acima, reutilizamos)
+                    if (rootNode == null) rootNode = mapper.readTree(jsonRequest); // Segurança caso a primeira leitura falhe
 
-                    // 3. Chama o método com a assinatura correta (JsonNode, String)
                     jsonResponse = processOperation(rootNode, operacao);
 
                 } catch (Exception e) {
-                    // Se a validação falhar, cria um JSON de erro
+                    // 4. O 'catch' agora usa o valor CORRETO de 'operacao'.
                     ObjectNode errorNode = mapper.createObjectNode();
-                    errorNode.put("operacao", operacao); // Usa a operação lida
+                    errorNode.put("operacao", operacao);
                     errorNode.put("status", false);
                     errorNode.put("info", e.getMessage());
                     jsonResponse = errorNode.toString();
                 }
 
                 System.out.println("Enviando para o cliente: " + jsonResponse);
-                if (jsonResponse != null) { // Não envia resposta para 'erro_servidor'
+                if (jsonResponse != null) {
                     out.println(jsonResponse);
                 }
             }
@@ -70,7 +78,6 @@ public class ClientHandler implements Runnable {
     private String processOperation(JsonNode rootNode, String operacao) throws IOException {
 
         switch (operacao) {
-            // --- NOVOS CASES EP-2 ---
             case "conectar":
                 return createResponse("conectar", true, "Servidor conectado com sucesso.");
             case "depositar":
@@ -81,9 +88,8 @@ public class ClientHandler implements Runnable {
                 return handleTransacaoCriar(rootNode);
             case "erro_servidor":
                 handleErroServidor(rootNode);
-                return null; // Não envia resposta
+                return null;
 
-            // --- Cases Antigos EP-1 ---
             case "usuario_criar":
                 return handleUsuarioCriar(rootNode);
             case "usuario_login":
@@ -205,8 +211,6 @@ public class ClientHandler implements Runnable {
         return createResponse("usuario_logout", false, "Token inválido.");
     }
 
-    // --- NOVOS MÉTODOS DE MANIPULAÇÃO (EP-2) ---
-
     /**
      * (Itens f, g) Lida com o depósito e atualiza o saldo.
      */
@@ -218,18 +222,19 @@ public class ClientHandler implements Runnable {
         if (cpf == null) {
             return createResponse("depositar", false, "Token inválido ou sessão expirada.");
         }
-        if (valorEnviado <= 0) {
+
+        // Arredonda o valor para 2 casas decimais
+        double valorArredondado = Math.round(valorEnviado * 100.0) / 100.0;
+
+        if (valorArredondado <= 0) {
             return createResponse("depositar", false, "Valor do depósito deve ser positivo.");
         }
 
         Usuario usuario = Server.usuarios.get(cpf);
-        // Item (g): Atualiza saldo
-        usuario.setSaldo(usuario.getSaldo() + valorEnviado);
+        usuario.setSaldo(usuario.getSaldo() + valorArredondado);
 
-        // Item (4.9 do protocol): Cria registro de transação
         int transacaoId = Server.transacaoIdCounter.getAndIncrement();
-        // Para depósito, o enviador e o recebedor são o mesmo usuário
-        Transacao deposito = new Transacao(transacaoId, valorEnviado, usuario, usuario);
+        Transacao deposito = new Transacao(transacaoId, valorArredondado, usuario, usuario);
         Server.transacoes.add(deposito);
 
         return createResponse("depositar", true, "Deposito realizado com sucesso.");
@@ -247,7 +252,10 @@ public class ClientHandler implements Runnable {
         if (cpfEnviador == null) {
             return createResponse("transacao_criar", false, "Token inválido ou sessão expirada.");
         }
-        if (valor <= 0) {
+
+        double valorArredondado = Math.round(valor * 100.0) / 100.0;
+
+        if (valorArredondado <= 0) {
             return createResponse("transacao_criar", false, "Valor da transação deve ser positivo.");
         }
         if (cpfEnviador.equals(cpfDestino)) {
@@ -261,22 +269,20 @@ public class ClientHandler implements Runnable {
             return createResponse("transacao_criar", false, "CPF de destino não encontrado.");
         }
 
-        // Garante atomicidade na transação
         synchronized (usuarioEnviador) {
-            if (usuarioEnviador.getSaldo() < valor) {
+            if (usuarioEnviador.getSaldo() < valorArredondado) {
                 return createResponse("transacao_criar", false, "Saldo insuficiente.");
             }
-            usuarioEnviador.setSaldo(usuarioEnviador.getSaldo() - valor);
-            usuarioRecebedor.setSaldo(usuarioRecebedor.getSaldo() + valor);
+            usuarioEnviador.setSaldo(usuarioEnviador.getSaldo() - valorArredondado);
+            usuarioRecebedor.setSaldo(usuarioRecebedor.getSaldo() + valorArredondado);
         }
 
         int transacaoId = Server.transacaoIdCounter.getAndIncrement();
-        Transacao transacao = new Transacao(transacaoId, valor, usuarioEnviador, usuarioRecebedor);
+        Transacao transacao = new Transacao(transacaoId, valorArredondado, usuarioEnviador, usuarioRecebedor);
         Server.transacoes.add(transacao);
 
         return createResponse("transacao_criar", true, "Transação realizada com sucesso.");
     }
-
     /**
      * (Item h) Lida com o pedido de extrato (transacao_ler).
      */
@@ -292,16 +298,13 @@ public class ClientHandler implements Runnable {
             Instant dataInicial = Instant.parse(node.get("data_inicial").asText());
             Instant dataFinal = Instant.parse(node.get("data_final").asText());
 
-            // Validação do limite de 31 dias
             if (ChronoUnit.DAYS.between(dataInicial, dataFinal) > 31) {
                 return createResponse("transacao_ler", false, "Erro: O período máximo para extrato é de 31 dias.");
             }
 
             ArrayNode transacoesArray = mapper.createArrayNode();
-            // Itera de forma segura na lista de transações
             synchronized (Server.transacoes) {
                 for (Transacao tx : Server.transacoes) {
-                    // Verifica se o usuário está envolvido E se está no intervalo de data
                     if (tx.envolveUsuario(cpf) && tx.estaNoIntervalo(dataInicial, dataFinal)) {
                         transacoesArray.add(criarJsonDaTransacao(tx));
                     }
@@ -319,7 +322,6 @@ public class ClientHandler implements Runnable {
             return createResponse("transacao_ler", false, "Erro ao processar datas ou transações.");
         }
     }
-
     /**
      * (Protocolo 4.11) Apenas loga o erro reportado pelo cliente.
      */
@@ -332,7 +334,6 @@ public class ClientHandler implements Runnable {
         System.err.println("Info: " + infoErro);
         System.err.println("-------------------------------------");
     }
-
     // --- MÉTODO AUXILIAR ---
 
     private String createResponse(String operacao, boolean status, String info) {
@@ -349,7 +350,7 @@ public class ClientHandler implements Runnable {
         txNode.put("id", tx.getId());
         txNode.put("valor_enviado", tx.getValorEnviado());
         txNode.put("criado_em", tx.getCriadoEm());
-        txNode.put("atualizado_em", tx.getCriadoEm()); // Protocolo pede, usamos o 'criado_em'
+        txNode.put("atualizado_em", tx.getCriadoEm());
 
         ObjectNode enviadorNode = mapper.createObjectNode();
         enviadorNode.put("nome", tx.getUsuarioEnviador().getNome());
