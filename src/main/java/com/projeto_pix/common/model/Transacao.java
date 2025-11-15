@@ -1,7 +1,6 @@
 package com.projeto_pix.common.model;
 
 import java.time.Instant;
-import java.time.format.DateTimeFormatter;
 
 public class Transacao {
     private int id;
